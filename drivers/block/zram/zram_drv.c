@@ -38,6 +38,11 @@
 #include "zram_drv.h"
 #include "zcomp.h"
 
+uint64_t cpu_zram = 0;
+uint64_t eh_zram = 0;
+
+EXPORT_SYMBOL(eh_zram);
+EXPORT_SYMBOL(cpu_zram);
 static DEFINE_IDR(zram_index_idr);
 /* idr index must be protected */
 static DEFINE_MUTEX(zram_index_mutex);
@@ -144,6 +149,7 @@ static inline bool zram_allocated(struct zram *zram, u32 index)
 static inline bool is_partial_io(struct bio_vec *bvec)
 {
 	return bvec->bv_len != PAGE_SIZE;
+	a
 }
 #else
 static inline bool is_partial_io(struct bio_vec *bvec)
@@ -207,7 +213,7 @@ static ssize_t disksize_show(struct device *dev,
 {
 	struct zram *zram = dev_to_zram(dev);
 
-	return scnprintf(buf, PAGE_SIZE, "%llu\n", zram->disksize);
+	return scnprintf(buf, PAGE_SIZE, "%llu %llu %llu\n", zram->disksize, cpu_zram, eh_zram);
 }
 
 static ssize_t mem_limit_store(struct device *dev,
@@ -1560,6 +1566,11 @@ static int zram_rw_page(struct block_device *bdev, sector_t sector,
 
 	index = sector >> SECTORS_PER_PAGE_SHIFT;
 	offset = (sector & (SECTORS_PER_PAGE - 1)) << SECTOR_SHIFT;
+
+	if (op_is_write(op)) 
+		printk("Write: index %d offset %d pfn %d\n", index, offset, page_to_pfn(page));
+	else
+		printk("Read: index %d offset %d pfn %d\n", index, offset, page_to_pfn(page));
 
 	bv.bv_page = page;
 	bv.bv_len = PAGE_SIZE;

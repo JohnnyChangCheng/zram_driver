@@ -8,6 +8,8 @@
 
 #include "zcomp.h"
 
+extern uint64_t cpu_zram;
+
 static const char * const backends[] = {
 	"lzo",
 	"lzo-rle",
@@ -57,7 +59,7 @@ int zcomp_cpu_compress(struct zcomp *comp, struct page *page,
 	unsigned int comp_len;
 	void *src;
 	struct zcomp_strm *stream;
-
+	cpu_zram++;
 	/*
 	 * Our dst memory (stream->buffer) is always `2 * PAGE_SIZE' sized
 	 * because sometimes we can endup having a bigger compressed data
