@@ -89,6 +89,24 @@ void reclaim_memory_page(int lru, unsigned long amount)
 }
 
 
+void iterate_global_active_lru(void)
+{
+	struct mem_cgroup *memcg;
+    struct lruvec *lruvec;
+    struct page *page;
+    pg_data_t *pgdat = NODE_DATA(nid);
+	printk(KERN_INFO "Tried Iteratro pages\n");
+	memcg = mem_cgroup_iter(NULL, NULL, NULL);
+	do {
+		lruvec = mem_cgroup_lruvec(memcg, pgdat);
+		list_for_each_entry(page, &lruvec->lists[LRU_UNEVICTABLE], lru) {
+            // Do something with the page, e.g., print page info
+            printk(KERN_INFO "Active File Page: pfn=%lu\n", page_to_pfn(page));
+        }
+		memcg = mem_cgroup_iter(NULL, memcg, NULL);
+	} while (memcg);
+	return;
+}
 
 static int is_stack(struct vm_area_struct *vma)
 {
@@ -159,11 +177,16 @@ void account_vma_fault(struct task_struct *p, struct vm_area_struct *vma)
 }
 EXPORT_SYMBOL(account_vma_fault);
 
+extern __u64 swap_ns;
+extern __u64 swap_ns2;
+extern __u64 swap_time;
+extern __u64 do_swap_ns;
+extern __u64 do_swap_time;
 static ssize_t total_fault_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "Total File Fault %llu Anon Fault %llu File Rclaim %llu Anono Reclaim %llu Reclaim inactive anon %llu active anon %llu inactive file %llu active file %llu\n",
-			  profile_data.file_fault, profile_data.anon_fault, profile_data.file_reclaim, profile_data.anon_reclaim, lru_reclaimed[0], lru_reclaimed[1], lru_reclaimed[2], lru_reclaimed[3]);
+	return sysfs_emit(buf, "DO Swap Page Cost %llu SWAP Page Cost %llu %llu Total File Fault %llu Anon Fault %llu File Rclaim %llu Anono Reclaim %llu Reclaim inactive anon %llu active anon %llu inactive file %llu active file %llu\n",
+			  do_swap_ns/do_swap_time,swap_ns/swap_time, swap_ns2/swap_time, profile_data.file_fault, profile_data.anon_fault, profile_data.file_reclaim, profile_data.anon_reclaim, lru_reclaimed[0], lru_reclaimed[1], lru_reclaimed[2], lru_reclaimed[3]);
 }
 static ssize_t total_fault_store(struct device *dev,
 			       struct device_attribute *attr, const char *buf,
@@ -171,6 +194,7 @@ static ssize_t total_fault_store(struct device *dev,
 {
 	profile_data.file_fault = 0;
 	profile_data.anon_fault = 0;
+	iterate_global_active_lru();
 	return count;
 }
 static DEVICE_ATTR_RW(total_fault);

@@ -3580,6 +3580,12 @@ EXPORT_SYMBOL(unmap_mapping_range);
  */
 extern void account_anon_fault(void);
 
+__u64 swap_ns = 0;
+__u64 swap_ns2 = 0;
+__u64 swap_time = 0;
+EXPORT_SYMBOL(swap_time);
+EXPORT_SYMBOL(swap_ns);
+EXPORT_SYMBOL(swap_ns2);
 vm_fault_t do_swap_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
@@ -3590,6 +3596,10 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	int exclusive = 0;
 	vm_fault_t ret;
 	void *shadow = NULL;
+
+	struct timespec64 start, end, start2;
+
+	ktime_get_ts64(&start);
 
 	if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
 		pte_unmap(vmf->pte);
@@ -3635,9 +3645,10 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 
 		if (data_race(si->flags & SWP_SYNCHRONOUS_IO) &&
 		    __swap_count(entry) == 1) {
+			
+			
 			/* skip swapcache */
 			gfp_t flags = GFP_HIGHUSER_MOVABLE | __GFP_CMA;
-
 			trace_android_rvh_set_skip_swapcache_flags(&flags);
 			page = alloc_page_vma(flags, vma, vmf->address);
 			if (page) {
@@ -3662,7 +3673,12 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 					workingset_refault(page, shadow);
 
 				lru_cache_add(page);
+				ktime_get_ts64(&start2);
 				swap_readpage(page, true);
+				ktime_get_ts64(&end);
+				swap_ns += timespec64_to_ns(&end) - timespec64_to_ns(&start);
+				swap_ns2 += timespec64_to_ns(&end) - timespec64_to_ns(&start2);
+				swap_time++;
 			}
 		} else if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
 			/*
@@ -4656,6 +4672,10 @@ split:
 	return VM_FAULT_FALLBACK;
 }
 
+__u64 do_swap_ns = 0;
+__u64 do_swap_time = 0;
+EXPORT_SYMBOL(do_swap_time);
+EXPORT_SYMBOL(do_swap_ns);
 /*
  * These routines also need to handle stuff like marking pages dirty
  * and/or accessed for architectures that don't do it in hardware (most
@@ -4741,8 +4761,16 @@ skip_pmd_checks:
 			return do_fault(vmf);
 	}
 
-	if (!pte_present(vmf->orig_pte))
-		return do_swap_page(vmf);
+	if (!pte_present(vmf->orig_pte)) {
+		struct timespec64 start, end;
+    	vm_fault_t ret;
+		ktime_get_ts64(&start);
+		ret = do_swap_page(vmf);
+		ktime_get_ts64(&end);
+		do_swap_ns += timespec64_to_ns(&end) - timespec64_to_ns(&start);
+		do_swap_time++;
+		return ret;
+	}
 
 	if (pte_protnone(vmf->orig_pte) && vma_is_accessible(vmf->vma))
 		return do_numa_page(vmf);

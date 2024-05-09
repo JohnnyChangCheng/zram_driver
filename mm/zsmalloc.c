@@ -131,7 +131,7 @@
 #define ZS_MIN_ALLOC_SIZE \
 	MAX(32, (ZS_MAX_PAGES_PER_ZSPAGE << PAGE_SHIFT >> OBJ_INDEX_BITS))
 /* each chunk includes extra space to keep handle */
-#define ZS_MAX_ALLOC_SIZE	PAGE_SIZE
+#define ZS_MAX_ALLOC_SIZE	(PAGE_SIZE)
 
 /*
  * On systems with 4K page size, this gives 255 size classes! There is a

@@ -208,7 +208,6 @@ kernel_build(
         "videobuf2-dma-sg.ko",
         "xhci-exynos.ko",
         "zcomp_cpu.ko",
-        "zcomp_eh.ko",
         "zram.ko",
         "zsmalloc.ko",
     ],

@@ -5,6 +5,8 @@
 #include "zcomp.h"
 #include <linux/eh.h>
 
+extern uint64_t eh_zram;
+
 static void zcomp_eh_compress_done(int compr_ret, void *buffer,
 				   unsigned int size, void *priv)
 {
@@ -14,6 +16,7 @@ static void zcomp_eh_compress_done(int compr_ret, void *buffer,
 static int zcomp_eh_compress(struct zcomp *comp, struct page *page,
 				struct zcomp_cookie *cookie)
 {
+	eh_zram++;
 	return eh_compress_page(comp->private, page, cookie);
 }
 

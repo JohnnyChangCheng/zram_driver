@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 #include <linux/highmem.h>
 #include <linux/blkdev.h>
+#include <linux/page-flags.h>
 #include <linux/bio.h>
 
 #define CREATE_TRACE_POINTS
@@ -17,6 +18,8 @@
 #include "zram_drv.h"
 #include "zcomp.h"
 
+extern volatile __u8  decompress_on;
+extern __u8 new_algo_on;
 #define ZCOMP_ALGO_NAME_MAX 64
 
 struct zcomp_backend {
@@ -302,8 +305,14 @@ static void zram_append_request(struct zcomp *comp, struct zcomp_cookie *cookie)
 	spin_unlock(&comp->request_lock);
 }
 
-int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
-			struct bio *bio)
+extern unsigned int compress_amount;
+extern pid_t track_pid;
+extern unsigned int slot_cache;
+extern unsigned int slot_lzo_rle;
+extern unsigned int slot_non_important_lzo_rle;
+extern unsigned int slot_zstd;
+
+int zcomp_compress(struct zcomp *comp, u32 index, struct page *page, struct bio *bio)
 {
 	/*
 	 * Async IO should return 1 instead of 0 to indicate
@@ -314,6 +323,11 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 	unsigned long element;
 	struct zcomp_cookie *cookie;
 
+
+	comp->zram->table[index].comp_time = ktime_get_boottime();
+	if (decompress_on && current->group_leader->pid == track_pid)
+		compress_amount++;
+	
 	if (zcomp_page_same_pattern(page, &element)) {
 		zram_slot_update(comp->zram, index, element, 0);
 		return 0;
@@ -328,7 +342,24 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 		cookie->page = page;
 		cookie->bio = bio;
 
-		return comp->op->compress(comp, page, cookie);
+		if (new_algo_on > 0) {
+			if (PageCachezram(page)) {
+				comp->zram->table[index].non_zstd = 1;
+				ret = comp->op->cache_compress(comp, page, cookie);
+				slot_cache++;
+			} else if (PageLzorle(page)) {
+				comp->zram->table[index].non_zstd = 2;
+				ret = comp->op->compress(comp, page, cookie);
+				slot_lzo_rle++;
+			} else{
+				comp->zram->table[index].non_zstd = 3;
+				ret = comp->op->compress(comp, page, cookie);
+				slot_non_important_lzo_rle++;
+			}
+		} else {
+			ret = comp->op->compress(comp, page, cookie);
+		}
+		return ret;
 	}
 
 	cookie = alloc_zcomp_cookie(comp);
@@ -365,6 +396,75 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 	return ret;
 }
 
+int zcomp_compress_to_lzo_rle(struct zram *zram, u32 index)
+{
+	void *src;
+	int ret;
+	unsigned int src_len;
+	static u8 page_buff[PAGE_SIZE];
+	static struct zcomp_cookie cookie;
+	unsigned long handle = zram_get_handle(zram, index);
+
+	if (!handle || zram->table[index].non_zstd != 1)
+		return 0;
+	
+	src_len = zram_get_obj_size(zram, index);
+	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+	memcpy(page_buff, src, PAGE_SIZE);
+
+	
+	zs_unmap_object(zram->mem_pool, handle);
+	cookie.zram = zram;
+	cookie.index = index;
+
+	ret = zram->comp->op->cache_recompress(zram->comp, page_buff, &cookie);
+	zram->table[index].non_zstd = 2;
+	slot_cache--;
+	slot_lzo_rle++;
+	
+	return 0;
+
+}
+int zcomp_compress_to_zstd(struct zram *zram, u32 index)
+{
+	void *src;
+	int ret;
+	unsigned int src_len;
+	static u8 page_buff[PAGE_SIZE];
+	static struct zcomp_cookie cookie;
+	unsigned long handle = zram_get_handle(zram, index);
+
+	if (!handle || zram_test_flag(zram, index, ZRAM_SAME))
+		return 0;
+	
+	src_len = zram_get_obj_size(zram, index);
+	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+	if (src_len == PAGE_SIZE) 
+		memcpy(page_buff, src, PAGE_SIZE);
+	else  
+		ret = zram->comp->op->dest_decompress(zram->comp, src, src_len, page_buff);
+	
+	zs_unmap_object(zram->mem_pool, handle);
+	cookie.zram = zram;
+	cookie.index = index;
+
+	ret = zram->comp->op->zstd_compress(zram->comp, page_buff, &cookie);
+
+	zram_set_flag(zram, index, ZRAM_ZSTD);
+	zram->table[index].non_zstd = 4;
+	slot_non_important_lzo_rle--;
+	slot_zstd++;
+	return 0;
+
+}
+extern unsigned int decompress_amount_no_sync;
+extern unsigned int decompress_amount_no_sync_zstd;
+extern unsigned int decompress_amount_sync;
+extern unsigned int decompress_amount_zstd;
+extern unsigned int decompress_amount_lzo_rle;
+extern unsigned int decompress_amount_cache;
+extern volatile __u32 expire;
+
 int zcomp_decompress(struct zcomp *comp, u32 index, struct page *page)
 {
 	int ret = 0;
@@ -372,6 +472,60 @@ int zcomp_decompress(struct zcomp *comp, u32 index, struct page *page)
 	unsigned int src_len;
 	unsigned long handle;
 	struct zram *zram = comp->zram;
+
+	if (new_algo_on > 0) {
+		if (decompress_on) {
+			if (current->group_leader->pid == track_pid) {
+				decompress_amount_sync++;
+				SetPageCachezram(page);
+
+				if (zram_test_flag(zram, index, ZRAM_ZSTD)) {
+					decompress_amount_zstd++;
+					slot_zstd--;
+				} else if (zram->table[index].non_zstd == 2) {
+					decompress_amount_lzo_rle++;
+					slot_lzo_rle--;
+				} else if (zram->table[index].non_zstd == 1) {
+					slot_cache--;
+					decompress_amount_cache++;
+				} else {
+					slot_non_important_lzo_rle--;
+				}
+			} else {
+				decompress_amount_no_sync++;
+				if (zram_test_flag(zram, index, ZRAM_ZSTD)) {
+					decompress_amount_no_sync_zstd++;
+					slot_zstd--;
+				} else if (zram->table[index].non_zstd == 1) {
+					SetPageCachezram(page);
+					slot_cache--;
+				} else {
+					SetPageLzorle(page);
+					if (zram->table[index].non_zstd == 2)
+						slot_lzo_rle--;
+					else
+						slot_non_important_lzo_rle--;
+				}
+			}
+		} else if (new_algo_on == 2) {
+			if (zram->table[index].non_zstd == 2) {
+				SetPageLzorle(page);
+				slot_lzo_rle--;
+
+			} else if (zram->table[index].non_zstd == 1) {
+				SetPageCachezram(page);
+				slot_cache--;
+			} else if (zram_test_flag(zram, index, ZRAM_ZSTD)) {
+				slot_zstd--;
+			} else {
+				slot_non_important_lzo_rle--;
+			}
+		}
+	}
+
+	zram->table[index].non_zstd = 0;
+	zram->table[index].comp_time = 0;
+	comp->zram->table[index].switch_cnt = -1;
 
 	handle = zram_get_handle(zram, index);
 	if (!handle || zram_test_flag(zram, index, ZRAM_SAME)) {
@@ -383,6 +537,7 @@ int zcomp_decompress(struct zcomp *comp, u32 index, struct page *page)
 		goto out;
 	}
 
+	// Page cache here too.
 	src_len = zram_get_obj_size(zram, index);
 	if (src_len == PAGE_SIZE) {
 		src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
@@ -393,11 +548,20 @@ int zcomp_decompress(struct zcomp *comp, u32 index, struct page *page)
 		goto out;
 	}
 
-	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+	
 	trace_zcomp_decompress_start(page, index);
-	ret = comp->op->decompress(comp, src, src_len, page);
+	if (zram_test_flag(zram, index, ZRAM_ZSTD)) {
+		src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+		ret = comp->op->zstd_decompress(comp, src, src_len, page);
+		zs_unmap_object(zram->mem_pool, handle);
+	} else {
+		src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+		ret = comp->op->decompress(comp, src, src_len, page);
+		zs_unmap_object(zram->mem_pool, handle);
+
+	}
 	trace_zcomp_decompress_end(page, index);
-	zs_unmap_object(zram->mem_pool, handle);
+	
 out:
 	return ret;
 }

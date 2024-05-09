@@ -34,9 +34,25 @@
 #include <linux/debugfs.h>
 #include <linux/cpuhotplug.h>
 #include <linux/part_stat.h>
+#include <linux/delay.h>
+#include <linux/memcontrol.h>
 
 #include "zram_drv.h"
 #include "zcomp.h"
+
+uint64_t cpu_zram = 0;
+uint64_t eh_zram = 0;
+uint64_t compress_time = 0;
+uint64_t compress_count = 0;
+uint64_t decompress_time = 0;
+uint64_t decompress_count = 0;
+
+EXPORT_SYMBOL(eh_zram);
+EXPORT_SYMBOL(cpu_zram);
+EXPORT_SYMBOL(compress_time);
+EXPORT_SYMBOL(compress_count);
+EXPORT_SYMBOL(decompress_time);
+EXPORT_SYMBOL(decompress_count);
 
 static DEFINE_IDR(zram_index_idr);
 /* idr index must be protected */
@@ -55,7 +71,7 @@ static int zram_bvec_read(struct zram *zram, struct bio_vec *bvec,
 			u32 index, int offset, struct bio *bio, bool accesss);
 
 
-static int zram_slot_trylock(struct zram *zram, u32 index)
+int zram_slot_trylock(struct zram *zram, u32 index)
 {
 	return bit_spin_trylock(ZRAM_LOCK, &zram->table[index].flags);
 }
@@ -97,7 +113,7 @@ bool zram_test_flag(struct zram *zram, u32 index,
 	return zram->table[index].flags & BIT(flag);
 }
 
-static void zram_set_flag(struct zram *zram, u32 index,
+void zram_set_flag(struct zram *zram, u32 index,
 			enum zram_pageflags flag)
 {
 	zram->table[index].flags |= BIT(flag);
@@ -144,6 +160,7 @@ static inline bool zram_allocated(struct zram *zram, u32 index)
 static inline bool is_partial_io(struct bio_vec *bvec)
 {
 	return bvec->bv_len != PAGE_SIZE;
+	a
 }
 #else
 static inline bool is_partial_io(struct bio_vec *bvec)
@@ -207,7 +224,7 @@ static ssize_t disksize_show(struct device *dev,
 {
 	struct zram *zram = dev_to_zram(dev);
 
-	return scnprintf(buf, PAGE_SIZE, "%llu\n", zram->disksize);
+	return scnprintf(buf, PAGE_SIZE, "%llu %llu %llu\n", zram->disksize, cpu_zram, eh_zram);
 }
 
 static ssize_t mem_limit_store(struct device *dev,
@@ -1047,13 +1064,13 @@ static ssize_t io_stat_show(struct device *dev,
 	return ret;
 }
 
-static ssize_t mm_stat_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
+
+static ssize_t mm_stat_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct zram *zram = dev_to_zram(dev);
 	struct zs_pool_stats pool_stats;
-	unsigned long orig_size, compr_size, max_used, same_pages,
-		      huge_pages, huge_pages_since, mem_used;
+	unsigned long orig_size, compr_size, max_used, same_pages, huge_pages, huge_pages_since,
+		mem_used;
 	ssize_t ret;
 
 	mem_used = 0;
@@ -1072,13 +1089,12 @@ static ssize_t mm_stat_show(struct device *dev,
 	huge_pages = zram_stat_read(zram, NR_HUGE_PAGE);
 	huge_pages_since = zram_stat_read(zram, NR_HUGE_PAGE_SINCE);
 
-	ret = scnprintf(buf, PAGE_SIZE,
-			"%8lu %8lu %8lu %8lu %8lu %8lu %8ld %8lu %8lu\n",
-			orig_size << PAGE_SHIFT, compr_size,
-			mem_used << PAGE_SHIFT, zram->limit_pages << PAGE_SHIFT,
-			max_used << PAGE_SHIFT, same_pages,
-			atomic_long_read(&pool_stats.pages_compacted), huge_pages,
-			huge_pages_since);
+
+	ret = scnprintf(buf, PAGE_SIZE, "%8lu %8lu %8lu %8lu %8lu %8lu %8ld %8lu %8lu %d %lu %lu\n",
+			orig_size << PAGE_SHIFT, compr_size, mem_used << PAGE_SHIFT,
+			zram->limit_pages << PAGE_SHIFT, max_used << PAGE_SHIFT, same_pages,
+			atomic_long_read(&pool_stats.pages_compacted), huge_pages, huge_pages_since,
+			(compr_size * 100) / (orig_size << PAGE_SHIFT), compress_time/compress_count, decompress_time/decompress_count);
 
 	up_read(&zram->init_lock);
 
@@ -1197,9 +1213,40 @@ void zram_slot_update(struct zram *zram, u32 index,
 	}
 }
 
+void zram_slot_update_no_lock(struct zram *zram, u32 index,
+		unsigned long handle, unsigned int comp_len)
+{
+	/*
+	 * free memory associated with this sector
+	 * before overwriting unused sectors.
+	 */
+	__this_cpu_inc(zram->pcp_stats->items[NR_PAGE_STORED]);
+	zram_free_page(zram, index);
+
+	if (comp_len == 0) {
+		zram_set_flag(zram, index, ZRAM_SAME);
+		zram_set_element(zram, index, handle);
+		__this_cpu_inc(zram->pcp_stats->items[NR_SAME_PAGE]);
+	} else {
+		if (comp_len == PAGE_SIZE) {
+			zram_set_flag(zram, index, ZRAM_HUGE);
+			__this_cpu_inc(zram->pcp_stats->items[NR_HUGE_PAGE]);
+			__this_cpu_inc(
+				zram->pcp_stats->items[NR_HUGE_PAGE_SINCE]);
+		}
+		zram_set_handle(zram, index, handle);
+		zram_set_obj_size(zram, index, comp_len);
+	}
+	zram_accessed(zram, index);
+	if (comp_len) {
+		this_cpu_add(zram->pcp_stats->items[COMPRESSED_SIZE], comp_len);
+		update_max_used_page(zram);
+	}
+}
+
 /*
  * To protect concurrent access to the same index entry,
- * caller should hold this table index entry's bit_spinlock to
+ * caller should hold this table index entry's bit_spinlock toset
  * indicate this index entry is accessing.
  */
 static void zram_free_page(struct zram *zram, size_t index)
@@ -1215,6 +1262,12 @@ static void zram_free_page(struct zram *zram, size_t index)
 	if (zram_test_flag(zram, index, ZRAM_HUGE)) {
 		zram_clear_flag(zram, index, ZRAM_HUGE);
 		__this_cpu_dec(zram->pcp_stats->items[NR_HUGE_PAGE]);
+	}
+
+	if (zram_test_flag(zram, index, ZRAM_ZSTD)) {
+		zram_clear_flag(zram, index, ZRAM_ZSTD);
+
+		__this_cpu_inc(zram->pcp_stats->items[NR_ZSTD_STORE]);
 	}
 
 	if (zram_test_flag(zram, index, ZRAM_WB)) {
@@ -1621,6 +1674,238 @@ static void zram_reset_device(struct zram *zram)
 	zcomp_destroy(comp);
 	reset_bdev(zram);
 }
+volatile __u32  expire = 3600;
+EXPORT_SYMBOL(expire);
+
+
+static bool page_out_of_date(struct zram_table_entry *table)
+{
+	ktime_t difference;
+	ktime_t current_time = ktime_get_boottime();
+	struct timespec64 diff_ts;
+
+	if (table->comp_time == 0 || table->switch_cnt == -1)
+		return false;
+
+	// Calculate the difference
+	difference = ktime_sub(current_time, table->comp_time);
+
+	// Convert difference to timespec64 (seconds and nanoseconds)
+	diff_ts = ktime_to_timespec64(difference);
+
+	// Check if the difference is more than 1 minute (60 seconds)
+	return (diff_ts.tv_sec > expire);
+}
+
+unsigned int slot_cache = 0;
+unsigned int slot_lzo_rle = 0;
+unsigned int slot_non_important_lzo_rle = 0;
+unsigned int slot_zstd = 0;
+EXPORT_SYMBOL(slot_cache);
+EXPORT_SYMBOL(slot_lzo_rle);
+EXPORT_SYMBOL(slot_non_important_lzo_rle);
+EXPORT_SYMBOL(slot_zstd);
+
+
+unsigned int decompress_amount_no_sync = 0;
+unsigned int decompress_amount_sync = 0;
+unsigned int decompress_amount_no_sync_zstd = 0;
+unsigned int compress_amount = 0;
+unsigned int decompress_amount_zstd = 0;
+unsigned int decompress_amount_lzo_rle = 0;
+unsigned int decompress_amount_cache = 0;
+volatile __u8 decompress_on = 0;
+__u8 new_algo_on = 0;
+pid_t track_pid = 0;
+
+EXPORT_SYMBOL(decompress_amount_no_sync);
+EXPORT_SYMBOL(compress_amount);
+EXPORT_SYMBOL(decompress_amount_sync);
+EXPORT_SYMBOL(decompress_amount_zstd);
+EXPORT_SYMBOL(decompress_amount_lzo_rle);
+EXPORT_SYMBOL(decompress_amount_cache);
+EXPORT_SYMBOL(decompress_on);
+EXPORT_SYMBOL(new_algo_on);
+EXPORT_SYMBOL(decompress_amount_no_sync_zstd);
+
+static ssize_t fault_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	decompress_on = 0;
+	if (decompress_amount_no_sync/decompress_amount_no_sync_zstd < 30)
+		expire = 1800;
+	else
+		expire = 3600;
+	return scnprintf(buf, PAGE_SIZE,
+			 "Fault count: no sync: %u no sync: zstd %u sync decompress: %u from zstd: %u lzo_rle: %u cache: %u sync compress: %u\n",
+			 decompress_amount_no_sync, decompress_amount_no_sync_zstd, decompress_amount_sync, decompress_amount_zstd, decompress_amount_lzo_rle,
+			 decompress_amount_cache, compress_amount);
+}
+
+static ssize_t fault_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			   size_t len)
+{
+	int pid;
+	kstrtoint(buf, 10, &pid);
+	track_pid = pid;
+	decompress_on = 1;
+	decompress_amount_no_sync = 0;
+	compress_amount = 0;
+	decompress_amount_sync = 0;
+	decompress_amount_zstd = 0;
+	decompress_amount_lzo_rle = 0;
+	decompress_amount_cache = 0;
+	printk("Tracking pid fault %u", track_pid);
+	return len;
+}
+
+static ssize_t zstd_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+	unsigned long i = 0, total = 0, zstd = 0, cache = 0, lzo_rle = 0, non_important_lzo_rle = 0,
+		      min_lower_15 = 0, min_15 = 0, min_30 = 0, min_45 = 0, min_60 = 0;
+	ktime_t start = ktime_get_boottime();
+
+	for (; i < nr_pages; ++i) {
+		if (zram_get_obj_size(zram, i)) {
+			int algo = zram->table[i].non_zstd;
+			s64 interval_ns = ktime_to_ns(ktime_sub(start, zram->table[i].comp_time));
+			total++;
+			switch (algo) {
+			case 1:
+				cache++;
+				break;
+			case 2:
+				lzo_rle++;
+				break;
+			default:
+				if (zram_test_flag(zram, i, ZRAM_ZSTD))
+					zstd++;
+				else
+					non_important_lzo_rle++;
+			}
+			if (interval_ns > 1000000000L * 60L * 60L)
+				min_60++;
+			else if (interval_ns > 1000000000L * 60L * 45L)
+				min_45++;
+			else if (interval_ns > 1000000000L * 60L * 30L)
+				min_30++;
+			else if (interval_ns > 1000000000L * 60L * 15L)
+				min_15++;
+			else
+				min_lower_15++;
+		}
+	}
+
+	return scnprintf(
+		buf, PAGE_SIZE,
+		"Page status: Expire %u total: %u cache: %u lzo_rle: %u zstd: %u non important lzo-rle %u min_60: %u min_45: %u min_30: %u min_15: %u min_lower_15: %u\n",
+		expire, total, cache, lzo_rle, zstd, non_important_lzo_rle, min_60, min_45, min_30,
+		min_15, min_lower_15);
+}
+
+
+
+static ssize_t zstd_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			  size_t len)
+{
+	struct zram *zram = dev_to_zram(dev);
+
+	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+	unsigned long i = 0, deactive = 0;
+
+	if (!new_algo_on)
+		return len;
+
+	for (; i < nr_pages; ++i) {
+		if (zram_get_obj_size(zram, i) &&
+		    !zram_test_flag(zram, i, ZRAM_SAME) && !zram_test_flag(zram, i, ZRAM_ZSTD) &&
+		    zram->table[i].non_zstd == 0 && page_out_of_date(&zram->table[i])) {
+			deactive++;
+			printk("ZSTD: Compression zstd trigger");
+			zcomp_compress_to_zstd(zram, i);
+		}
+	}
+	printk("ZSTD: Deactive one %d", deactive);
+	return len;
+}
+
+static int thread_fn(void *param)
+{
+	struct zram *zram = (struct zram *)param;
+	while (!kthread_should_stop()) { 
+		unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+		unsigned long i = 0, cache_percentage, compression_rate;
+		compression_rate = zram_stat_read(zram, COMPRESSED_SIZE) * 100 / zram_stat_read(zram, NR_PAGE_STORED); 
+		cache_percentage = slot_cache * 100 / nr_pages; 
+
+		if (decompress_on == 1) {
+			msleep(1000);
+			continue;
+		}
+		for (i = 0; i < nr_pages; ++i) {
+			if (zram_get_obj_size(zram, i)) {
+				int algo = zram->table[i].non_zstd;
+				switch (algo) {
+				case 1: {
+					if (cache_percentage < 5)
+						continue;
+					else if (page_out_of_date(&zram->table[i])) {
+						zcomp_compress_to_lzo_rle(zram, i);
+						zram->table[i].non_zstd = 2;
+					}
+					break;
+				}
+				case 2: {
+					if (compression_rate < 37)
+						continue;
+					else if (page_out_of_date(&zram->table[i])) {
+						zram->table[i].non_zstd = 3;
+					}
+					break;
+				}
+				case 3: {
+					if (compression_rate < 37)
+						continue;
+					else if (page_out_of_date(&zram->table[i])) {
+						zcomp_compress_to_zstd(zram, i);
+						zram->table[i].non_zstd = 4;
+					}
+					break;
+				}
+				default:
+					break;
+				}
+			}
+		}
+
+		msleep(600 * 1000);
+	}
+	return 0;
+}
+
+static struct task_struct *thread_st;
+static ssize_t new_algo_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	new_algo_on = 0;
+	return scnprintf(buf, PAGE_SIZE, "Disable new algorithm\n");
+	
+}
+
+static ssize_t new_algo_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct zram *zram = dev_to_zram(dev);
+	new_algo_on = 1;
+
+	thread_st = kthread_run(thread_fn, zram, "stallthread");
+
+	if (len > 2) {
+		new_algo_on = 2;
+	}
+	return len;
+}
 
 static ssize_t disksize_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
@@ -1633,7 +1918,8 @@ static ssize_t disksize_store(struct device *dev,
 	disksize = memparse(buf, NULL);
 	if (!disksize)
 		return -EINVAL;
-
+	/* Customized Change */
+	//disksize = 8L * 1024L * 1024L * 1024L;
 	down_write(&zram->init_lock);
 	if (init_done(zram)) {
 		pr_info("Cannot change disksize for initialized device\n");
@@ -1743,6 +2029,9 @@ static DEVICE_ATTR_WO(compact);
 static DEVICE_ATTR_RW(disksize);
 static DEVICE_ATTR_RO(initstate);
 static DEVICE_ATTR_WO(reset);
+static DEVICE_ATTR_RW(fault);
+static DEVICE_ATTR_RW(zstd);
+static DEVICE_ATTR_RW(new_algo);
 static DEVICE_ATTR_WO(mem_limit);
 static DEVICE_ATTR_WO(mem_used_max);
 static DEVICE_ATTR_WO(idle);
@@ -1758,6 +2047,9 @@ static DEVICE_ATTR_RW(writeback_limit_enable);
 static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_disksize.attr,
 	&dev_attr_initstate.attr,
+	&dev_attr_fault.attr,
+	&dev_attr_zstd.attr,
+	&dev_attr_new_algo.attr,
 	&dev_attr_reset.attr,
 	&dev_attr_compact.attr,
 	&dev_attr_mem_limit.attr,

@@ -8,6 +8,12 @@
 
 #include "zcomp.h"
 
+extern uint64_t cpu_zram;
+extern uint64_t compress_time;
+extern uint64_t compress_count;
+extern uint64_t decompress_time;
+extern uint64_t decompress_count;
+
 static const char * const backends[] = {
 	"lzo",
 	"lzo-rle",
@@ -33,6 +39,7 @@ struct zcomp_strm {
 	local_lock_t lock;
 	void *buffer;
 	struct crypto_comp *tfm;
+	struct crypto_comp *zstd;
 };
 
 struct zcomp_strm *zcomp_stream_get(struct zcomp *comp)
@@ -57,7 +64,8 @@ int zcomp_cpu_compress(struct zcomp *comp, struct page *page,
 	unsigned int comp_len;
 	void *src;
 	struct zcomp_strm *stream;
-
+	ktime_t start, end;
+	cpu_zram++;
 	/*
 	 * Our dst memory (stream->buffer) is always `2 * PAGE_SIZE' sized
 	 * because sometimes we can endup having a bigger compressed data
@@ -75,8 +83,13 @@ int zcomp_cpu_compress(struct zcomp *comp, struct page *page,
 	comp_len = PAGE_SIZE * 2;
 	stream = zcomp_stream_get(comp);
 	src = kmap_atomic(page);
+	start = ktime_get();
 	err = crypto_comp_compress(stream->tfm, src, PAGE_SIZE,
 					stream->buffer, &comp_len);
+	end = ktime_get();
+	compress_time += ktime_to_ns(ktime_sub(end, start));
+	compress_count ++;
+
 	kunmap_atomic(src);
 	if (err) {
 		zcomp_stream_put(comp);
@@ -89,6 +102,205 @@ int zcomp_cpu_compress(struct zcomp *comp, struct page *page,
 	return err;
 }
 
+int zcomp_cpu_cache_compress(struct zcomp *comp, struct page *page,
+				struct zcomp_cookie *cookie)
+{
+	void *src;
+	int err = 0;
+	/*
+	 * Our dst memory (stream->buffer) is always `2 * PAGE_SIZE' sized
+	 * because sometimes we can endup having a bigger compressed data
+	 * due to various reasons: for example compression algorithms tend
+	 * to add some padding to the compressed buffer. Speaking of padding,
+	 * comp algorithm `842' pads the compressed length to multiple of 8
+	 * and returns -ENOSP when the dst memory is not big enough, which
+	 * is not something that ZRAM wants to see. We can handle the
+	 * `compressed_size > PAGE_SIZE' case easily in ZRAM, but when we
+	 * receive -ERRNO from the compressing backend we can't help it
+	 * anymore. To make `842' happy we need to tell the exact size of
+	 * the dst buffer, zram_drv will take care of the fact that
+	 * compressed buffer is too big.
+	 */
+
+	src = kmap_atomic(page);
+	err = zcomp_copy_buffer(err, src, PAGE_SIZE, cookie);
+	kunmap_atomic(src);
+
+	return err;
+}
+
+int zcomp_cpu_cache_recompress(struct zcomp *comp, void *src,
+				struct zcomp_cookie *cookie)
+{
+	int err;
+	unsigned int comp_len;
+	struct zcomp_strm *stream;
+	ktime_t start, end;
+	cpu_zram++;
+	/*
+	 * Our dst memory (stream->buffer) is always `2 * PAGE_SIZE' sized
+	 * because sometimes we can endup having a bigger compressed data
+	 * due to various reasons: for example compression algorithms tend
+	 * to add some padding to the compressed buffer. Speaking of padding,
+	 * comp algorithm `842' pads the compressed length to multiple of 8
+	 * and returns -ENOSP when the dst memory is not big enough, which
+	 * is not something that ZRAM wants to see. We can handle the
+	 * `compressed_size > PAGE_SIZE' case easily in ZRAM, but when we
+	 * receive -ERRNO from the compressing backend we can't help it
+	 * anymore. To make `842' happy we need to tell the exact size of
+	 * the dst buffer, zram_drv will take care of the fact that
+	 * compressed buffer is too big.
+	 */
+	comp_len = PAGE_SIZE * 2;
+	stream = zcomp_stream_get(comp);
+	start = ktime_get();
+	err = crypto_comp_compress(stream->tfm, src, PAGE_SIZE,
+					stream->buffer, &comp_len);
+	end = ktime_get();
+	compress_time += ktime_to_ns(ktime_sub(end, start));
+	compress_count ++;
+
+	if (err) {
+		zcomp_stream_put(comp);
+		pr_err("Compression failed! err=%d\n", err);
+	}
+
+	err = zcomp_copy_buffer(err, stream->buffer, comp_len, cookie);
+	zcomp_stream_put(comp);
+
+	return err;
+}
+
+int zcomp_cpu_compress_zstd_page(struct zcomp *comp, struct page *page,
+				struct zcomp_cookie *cookie)
+{
+	int err;
+	unsigned int comp_len;
+	void *src;
+	struct zcomp_strm *stream;
+	ktime_t start, end;
+	cpu_zram++;
+	/*
+	 * Our dst memory (stream->buffer) is always `2 * PAGE_SIZE' sized
+	 * because sometimes we can endup having a bigger compressed data
+	 * due to various reasons: for example compression algorithms tend
+	 * to add some padding to the compressed buffer. Speaking of padding,
+	 * comp algorithm `842' pads the compressed length to multiple of 8
+	 * and returns -ENOSP when the dst memory is not big enough, which
+	 * is not something that ZRAM wants to see. We can handle the
+	 * `compressed_size > PAGE_SIZE' case easily in ZRAM, but when we
+	 * receive -ERRNO from the compressing backend we can't help it
+	 * anymore. To make `842' happy we need to tell the exact size of
+	 * the dst buffer, zram_drv will take care of the fact that
+	 * compressed buffer is too big.
+	 */
+	comp_len = PAGE_SIZE * 2;
+	stream = zcomp_stream_get(comp);
+	src = kmap_atomic(page);
+	start = ktime_get();
+	err = crypto_comp_compress(stream->zstd, src, PAGE_SIZE,
+					stream->buffer, &comp_len);
+	end = ktime_get();
+	compress_time += ktime_to_ns(ktime_sub(end, start));
+	compress_count ++;
+
+	kunmap_atomic(src);
+	if (err) {
+		zcomp_stream_put(comp);
+		pr_err("Compression failed! err=%d\n", err);
+	}
+
+	err = zcomp_copy_buffer(err, stream->buffer, comp_len, cookie);
+	zcomp_stream_put(comp);
+
+	return err;
+}
+
+
+int zcomp_cpu_compress_zstd(struct zcomp *comp, void *src,
+				struct zcomp_cookie *cookie)
+{
+	int err;
+	unsigned int comp_len;
+	struct zcomp_strm *stream;
+	ktime_t start, end;
+	cpu_zram++;
+
+	printk("Filed %s",__func__);
+	comp_len = PAGE_SIZE * 2;
+	stream = zcomp_stream_get(comp);
+	start = ktime_get();
+	err = crypto_comp_compress(stream->zstd, src, PAGE_SIZE,
+					stream->buffer, &comp_len);
+	end = ktime_get();
+	compress_time += ktime_to_ns(ktime_sub(end, start));
+	compress_count ++;
+	if (err) {
+		zcomp_stream_put(comp);
+		pr_err("Compression failed! err=%d\n", err);
+	}
+
+	err = zcomp_copy_buffer(err, stream->buffer, comp_len, cookie);
+	zcomp_stream_put(comp);
+
+	return err;
+}
+
+int zcomp_cpu_decompress_dest(struct zcomp *comp, void *src,
+			unsigned int src_len, void* dst)
+{
+	unsigned int dst_len;
+	struct zcomp_strm *stream;
+	int ret;
+ 
+	dst_len = PAGE_SIZE;
+	stream = zcomp_stream_get(comp);
+	ret = crypto_comp_decompress(stream->tfm, src, src_len,
+							dst, &dst_len);
+	zcomp_stream_put(comp);
+
+	return ret;
+}
+
+int zcomp_cpu_decompress_zstd(struct zcomp *comp, void *src,
+			unsigned int src_len, struct page *page)
+{
+	void *dst;
+	unsigned int dst_len;
+	struct zcomp_strm *stream;
+	int ret;
+	ktime_t start, end;
+
+	dst = kmap_atomic(page);
+	dst_len = PAGE_SIZE;
+	stream = zcomp_stream_get(comp);
+	start = ktime_get();
+	ret = crypto_comp_decompress(stream->zstd, src, src_len,
+							dst, &dst_len);
+	end = ktime_get();
+	decompress_time += ktime_to_ns(ktime_sub(end, start));
+	decompress_count ++;
+	zcomp_stream_put(comp);
+	kunmap_atomic(dst);
+
+	return ret;
+}
+
+int zcomp_cpu_cache_decompress(struct zcomp *comp, void *src,
+			unsigned int src_len, struct page *page)
+{
+	void *dst;
+	unsigned int dst_len;
+
+	dst = kmap_atomic(page);
+	dst_len = PAGE_SIZE;
+	memcpy(dst, src, PAGE_SIZE);
+	kunmap_atomic(dst);
+
+	return 0;
+}
+
+
 int zcomp_cpu_decompress(struct zcomp *comp, void *src,
 			unsigned int src_len, struct page *page)
 {
@@ -96,14 +308,21 @@ int zcomp_cpu_decompress(struct zcomp *comp, void *src,
 	unsigned int dst_len;
 	struct zcomp_strm *stream;
 	int ret;
+	ktime_t start, end;
+
 
 	dst = kmap_atomic(page);
 	dst_len = PAGE_SIZE;
 	stream = zcomp_stream_get(comp);
+	start = ktime_get();
 	ret = crypto_comp_decompress(stream->tfm, src, src_len,
 							dst, &dst_len);
+	end = ktime_get();
+	decompress_time += ktime_to_ns(ktime_sub(end, start));
+	decompress_count ++;
 	zcomp_stream_put(comp);
 	kunmap_atomic(dst);
+
 
 	return ret;
 }
@@ -112,6 +331,8 @@ static void zcomp_strm_free(struct zcomp_strm *zstrm)
 {
 	if (!IS_ERR_OR_NULL(zstrm->tfm))
 		crypto_free_comp(zstrm->tfm);
+	if (!IS_ERR_OR_NULL(zstrm->zstd))
+		crypto_free_comp(zstrm->zstd);
 	free_pages((unsigned long)zstrm->buffer, 1);
 	zstrm->tfm = NULL;
 	zstrm->buffer = NULL;
@@ -124,11 +345,12 @@ static void zcomp_strm_free(struct zcomp_strm *zstrm)
 static int zcomp_strm_init(struct zcomp_strm *zstrm, struct zcomp *comp)
 {
 	zstrm->tfm = crypto_alloc_comp(comp->algo_name, 0, 0);
+	zstrm->zstd = crypto_alloc_comp("zstd", 0, 0);
 	/*
 	 * allocate 2 pages. 1 for compressed data, plus 1 extra for the
 	 * case when compressed size is larger than the original one
 	 */
-	zstrm->buffer = (void *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, 1);
+	zstrm->buffer = (void *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, 2);
 	if (IS_ERR_OR_NULL(zstrm->tfm) || !zstrm->buffer) {
 		zcomp_strm_free(zstrm);
 		return -ENOMEM;
@@ -167,6 +389,13 @@ const struct zcomp_operation zcomp_cpu_op = {
 	.destroy = zcomp_cpu_destroy,
 	.compress = zcomp_cpu_compress,
 	.decompress = zcomp_cpu_decompress,
+	.zstd_compress_page = zcomp_cpu_compress_zstd_page,
+	.zstd_compress = zcomp_cpu_compress_zstd,
+	.zstd_decompress = zcomp_cpu_decompress_zstd,
+	.dest_decompress = zcomp_cpu_decompress_dest,
+	.cache_compress = zcomp_cpu_cache_compress,
+	.cache_decompress = zcomp_cpu_cache_decompress,
+	.cache_recompress = zcomp_cpu_cache_recompress,
 };
 
 int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)

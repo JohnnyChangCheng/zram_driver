@@ -123,6 +123,8 @@ enum pageflags {
 	PG_reclaim,		/* To be reclaimed asap */
 	PG_swapbacked,		/* Page is backed by RAM/swap */
 	PG_unevictable,		/* Page is "unevictable"  */
+	PG_lzorle,
+	PG_cachezram,
 #ifdef CONFIG_MMU
 	PG_mlocked,		/* Page is vma mlocked */
 #endif
@@ -360,6 +362,10 @@ PAGEFLAG(Reserved, reserved, PF_NO_COMPOUND)
 PAGEFLAG(SwapBacked, swapbacked, PF_NO_TAIL)
 	__CLEARPAGEFLAG(SwapBacked, swapbacked, PF_NO_TAIL)
 	__SETPAGEFLAG(SwapBacked, swapbacked, PF_NO_TAIL)
+
+PAGEFLAG(Lzorle, lzorle, PF_NO_TAIL)
+
+PAGEFLAG(Cachezram, cachezram, PF_NO_TAIL)
 
 /*
  * Private page markings that may be used by the filesystem that owns the page
