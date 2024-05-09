@@ -1705,6 +1705,8 @@ static int shmem_replace_page(struct page **pagep, gfp_t gfp,
  * Returns 0 and the page in pagep if success. On failure, returns the
  * error code and NULL in *pagep.
  */
+extern void account_anon_fault(void);
+
 static int shmem_swapin_page(struct inode *inode, pgoff_t index,
 			     struct page **pagep, enum sgp_type sgp,
 			     gfp_t gfp, struct vm_area_struct *vma,
@@ -1729,6 +1731,7 @@ static int shmem_swapin_page(struct inode *inode, pgoff_t index,
 			*fault_type |= VM_FAULT_MAJOR;
 			count_vm_event(PGMAJFAULT);
 			count_memcg_event_mm(charge_mm, PGMAJFAULT);
+			account_anon_fault();
 		}
 		/* Here we actually start the io */
 		page = shmem_swapin(swap, gfp, info, index);

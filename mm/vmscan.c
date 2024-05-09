@@ -1118,6 +1118,7 @@ static void page_check_dirty_writeback(struct page *page,
 		mapping->a_ops->is_dirty_writeback(page, dirty, writeback);
 }
 
+extern void account_page_reclaim(struct page *page);
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
@@ -1146,6 +1147,7 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 
 		page = lru_to_page(page_list);
 		list_del(&page->lru);
+		account_page_reclaim(page);
 
 		if (!trylock_page(page))
 			goto keep;
@@ -1287,7 +1289,6 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 		case PAGEREF_RECLAIM_CLEAN:
 			; /* try to reclaim the page below */
 		}
-
 		/*
 		 * Anonymous process memory has backing store?
 		 * Try to allocate it some swap space here.
@@ -5352,14 +5353,14 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 }
 
 #endif /* CONFIG_LRU_GEN */
-
+extern void reclaim_memory_page(int lru, unsigned long amount);
 static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
 	unsigned long nr[NR_LRU_LISTS];
 	unsigned long targets[NR_LRU_LISTS];
 	unsigned long nr_to_scan;
 	enum lru_list lru;
-	unsigned long nr_reclaimed = 0;
+	unsigned long nr_reclaimed = 0, nr_reclaimed_one=0;
 	unsigned long nr_to_reclaim = sc->nr_to_reclaim;
 	bool proportional_reclaim;
 	struct blk_plug plug;
@@ -5401,9 +5402,10 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 			if (nr[lru]) {
 				nr_to_scan = min(nr[lru], SWAP_CLUSTER_MAX);
 				nr[lru] -= nr_to_scan;
-
-				nr_reclaimed += shrink_list(lru, nr_to_scan,
+				nr_reclaimed_one = shrink_list(lru, nr_to_scan,
 							    lruvec, sc);
+				reclaim_memory_page(lru, nr_reclaimed_one);
+				nr_reclaimed += nr_reclaimed_one;
 			}
 		}
 

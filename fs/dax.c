@@ -1256,6 +1256,7 @@ static bool dax_fault_is_synchronous(unsigned long flags,
 	return (flags & IOMAP_WRITE) && (vma->vm_flags & VM_SYNC)
 		&& (iomap->flags & IOMAP_F_DIRTY);
 }
+extern void account_file_fault(void);
 
 static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
 			       int *iomap_errp, const struct iomap_ops *ops)
@@ -1359,6 +1360,7 @@ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
 		if (iomap.flags & IOMAP_F_NEW) {
 			count_vm_event(PGMAJFAULT);
 			count_memcg_event_mm(vma->vm_mm, PGMAJFAULT);
+			account_file_fault();
 			major = VM_FAULT_MAJOR;
 		}
 		error = dax_iomap_pfn(&iomap, pos, PAGE_SIZE, &pfn);

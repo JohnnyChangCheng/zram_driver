@@ -6,9 +6,12 @@
 # Rewritten to use lists instead of if-statements.
 # 
 
+KBUILD_CFLAGS += -Wno-error=unused-function
+
 # needed for trace events
 ccflags-y				+= -I$(src)
 
+obj-y				+= memory_count.o
 obj-$(CONFIG_MAC_FLOPPY)	+= swim3.o
 obj-$(CONFIG_BLK_DEV_SWIM)	+= swim_mod.o
 obj-$(CONFIG_BLK_DEV_FD)	+= floppy.o

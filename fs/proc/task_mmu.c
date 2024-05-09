@@ -290,7 +290,12 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 	start = vma->vm_start;
 	end = vma->vm_end;
 	show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
-
+	if (vma->android_kabi_reserved1 > 0) {
+		if (file)
+			seq_printf(m, "f:%lu", vma->android_kabi_reserved1);
+		else
+			seq_printf(m, "a:%lu", vma->android_kabi_reserved1);
+	}
 	/*
 	 * Print the dentry name for named mappings, and a
 	 * special [heap] marker for the heap:

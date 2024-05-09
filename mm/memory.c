@@ -93,7 +93,7 @@
 #if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
-
+a
 #ifndef CONFIG_NEED_MULTIPLE_NODES
 /* use the per-pgdat data instead for discontigmem - mbligh */
 unsigned long max_mapnr;
@@ -3578,6 +3578,8 @@ EXPORT_SYMBOL(unmap_mapping_range);
  * We return with the mmap_lock locked or unlocked in the same cases
  * as does filemap_fault().
  */
+extern void account_anon_fault(void);
+
 vm_fault_t do_swap_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
@@ -3701,6 +3703,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		ret = VM_FAULT_MAJOR;
 		count_vm_event(PGMAJFAULT);
 		count_memcg_event_mm(vma->vm_mm, PGMAJFAULT);
+		account_anon_fault();
 	} else if (PageHWPoison(page)) {
 		/*
 		 * hwpoisoned dirty swapcache pages are kept for killing
@@ -4906,9 +4909,11 @@ retry_pud:
  * updates.  However note that the handling of PERF_COUNT_SW_PAGE_FAULTS should
  * still be in per-arch page fault handlers at the entry of page fault.
  */
+extern void account_vma_fault(struct task_struct *p, struct vm_area_struct *vma);
+
 static inline void mm_account_fault(struct pt_regs *regs,
 				    unsigned long address, unsigned int flags,
-				    vm_fault_t ret)
+				    vm_fault_t ret, struct vm_area_struct* vma)
 {
 	bool major;
 
@@ -4933,11 +4938,14 @@ static inline void mm_account_fault(struct pt_regs *regs,
 	 */
 	major = (ret & VM_FAULT_MAJOR) || (flags & FAULT_FLAG_TRIED);
 
-	if (major)
-		current->maj_flt++;
-	else
-		current->min_flt++;
-
+	if (major) {
+		if(vma && vma->vm_file) {
+			current->maj_flt++;
+		}
+		else {
+			current->min_flt++;
+		}
+	}
 	/*
 	 * If the fault is done for GUP, regs will be NULL.  We only do the
 	 * accounting for the per thread fault counters who triggered the
@@ -4946,9 +4954,12 @@ static inline void mm_account_fault(struct pt_regs *regs,
 	if (!regs)
 		return;
 
-	if (major)
+	if (major) {
 		perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MAJ, 1, regs, address);
-	else
+		if (vma)
+			vma->android_kabi_reserved1++;
+		account_vma_fault(current, vma);
+	} else
 		perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MIN, 1, regs, address);
 }
 
@@ -5200,7 +5211,7 @@ vm_fault_t __handle_speculative_fault(struct mm_struct *mm,
 	if (ret != VM_FAULT_RETRY) {
 		put_vma(*vma);
 		*vma = NULL;
-		mm_account_fault(regs, address, flags, ret);
+		mm_account_fault(regs, address, flags, ret, NULL);
 	}
 
 	return ret;
@@ -5298,7 +5309,7 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 			mem_cgroup_oom_synchronize(false);
 	}
 
-	mm_account_fault(regs, address, flags, ret);
+	mm_account_fault(regs, address, flags, ret, vma);
 
 	return ret;
 }

@@ -2720,6 +2720,7 @@ static struct file *do_async_mmap_readahead(struct vm_fault *vmf,
  *
  * Return: bitwise-OR of %VM_FAULT_ codes.
  */
+extern void account_file_fault(void);
 vm_fault_t filemap_fault(struct vm_fault *vmf)
 {
 	int error;
@@ -2799,6 +2800,7 @@ page_unlock:
 		/* No page in the page cache at all */
 		count_vm_event(PGMAJFAULT);
 		count_memcg_event_mm(vmf->vma->vm_mm, PGMAJFAULT);
+		account_file_fault();
 		ret = VM_FAULT_MAJOR;
 		fpin = do_sync_mmap_readahead(vmf);
 retry_find:
