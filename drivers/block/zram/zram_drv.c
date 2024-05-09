@@ -102,13 +102,13 @@ bool zram_test_flag(struct zram *zram, u32 index,
 	return zram->table[index].flags & BIT(flag);
 }
 
-static void zram_set_flag(struct zram *zram, u32 index,
+void zram_set_flag(struct zram *zram, u32 index,
 			enum zram_pageflags flag)
 {
 	zram->table[index].flags |= BIT(flag);
 }
 
-static void zram_clear_flag(struct zram *zram, u32 index,
+void zram_clear_flag(struct zram *zram, u32 index,
 			enum zram_pageflags flag)
 {
 	zram->table[index].flags &= ~BIT(flag);
@@ -1079,12 +1079,12 @@ static ssize_t mm_stat_show(struct device *dev,
 	huge_pages_since = zram_stat_read(zram, NR_HUGE_PAGE_SINCE);
 
 	ret = scnprintf(buf, PAGE_SIZE,
-			"%8lu %8lu %8lu %8lu %8lu %8lu %8ld %8lu %8lu\n",
+			"%8lu %8lu %8lu %8lu %8lu %8lu %8ld %8lu %8lu %d\n",
 			orig_size << PAGE_SHIFT, compr_size,
 			mem_used << PAGE_SHIFT, zram->limit_pages << PAGE_SHIFT,
 			max_used << PAGE_SHIFT, same_pages,
 			atomic_long_read(&pool_stats.pages_compacted), huge_pages,
-			huge_pages_since);
+			huge_pages_since, zs_huge_class_size(zram->mem_pool));
 
 	up_read(&zram->init_lock);
 
@@ -1203,6 +1203,21 @@ void zram_slot_update(struct zram *zram, u32 index,
 	}
 }
 
+void zram_slot_update_cache(struct zram *zram, u32 index)
+{
+	/*
+	 * free memory associated with this sector
+	 * before overwriting unused sectors.
+	 */
+	zram_slot_lock(zram, index);
+	__this_cpu_inc(zram->pcp_stats->items[NR_PAGE_STORED]);
+	zram_free_page(zram, index);
+	zram_set_flag(zram, index, ZRAM_CACHE);
+	__this_cpu_inc(zram->pcp_stats->items[NR_ZRAM_CACHE]);
+	zram_accessed(zram, index);
+	zram_slot_unlock(zram, index);
+}
+
 /*
  * To protect concurrent access to the same index entry,
  * caller should hold this table index entry's bit_spinlock to
@@ -1236,6 +1251,12 @@ static void zram_free_page(struct zram *zram, size_t index)
 	if (zram_test_flag(zram, index, ZRAM_SAME)) {
 		zram_clear_flag(zram, index, ZRAM_SAME);
 		__this_cpu_dec(zram->pcp_stats->items[NR_SAME_PAGE]);
+		goto out;
+	}
+
+	if (zram_test_flag(zram, index, ZRAM_CACHE)) {
+		zram_clear_flag(zram, index, ZRAM_CACHE);
+		__this_cpu_dec(zram->pcp_stats->items[NR_ZRAM_CACHE]);
 		goto out;
 	}
 

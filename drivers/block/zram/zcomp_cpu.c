@@ -10,9 +10,8 @@
 
 extern uint64_t cpu_zram;
 
-static const char * const backends[] = {
-	"lzo",
-	"lzo-rle",
+static const char *const backends[] = {
+	"lzo",	   "lzo-rle",
 #if IS_ENABLED(CONFIG_CRYPTO_LZ4)
 	"lz4",
 #endif
@@ -30,21 +29,6 @@ static const char * const backends[] = {
 #endif
 };
 
-struct zcomp_strm {
-	/* The members ->buffer and ->tfm are protected by ->lock. */
-	local_lock_t lock;
-	void *buffer;
-	struct crypto_comp *tfm;
-};
-
-struct zcomp_strm *zcomp_stream_get(struct zcomp *comp)
-{
-	struct zcomp_strm *zstrm = comp->private;
-
-	local_lock(&zstrm->lock);
-	return this_cpu_ptr(zstrm);
-}
-
 void zcomp_stream_put(struct zcomp *comp)
 {
 	struct zcomp_strm *zstrm = comp->private;
@@ -52,8 +36,27 @@ void zcomp_stream_put(struct zcomp *comp)
 	local_unlock(&zstrm->lock);
 }
 
-int zcomp_cpu_compress(struct zcomp *comp, struct page *page,
-				struct zcomp_cookie *cookie)
+int zcomp_cpu_compress_cache(struct zcomp *comp, void *src, struct zcomp_cookie *cookie)
+{
+	int err;
+	unsigned int comp_len;
+	struct zcomp_strm *stream;
+
+	comp_len = PAGE_SIZE * 2;
+	stream = zcomp_stream_get(comp);
+	err = crypto_comp_compress(stream->tfm, src, PAGE_SIZE, stream->buffer, &comp_len);
+	if (err) {
+		zcomp_stream_put(comp);
+		pr_err("Compression failed! err=%d\n", err);
+	}
+
+	err = zcomp_copy_buffer_cache(err, stream->buffer, comp_len, cookie);
+	zcomp_stream_put(comp);
+
+	return err;
+}
+
+int zcomp_cpu_compress(struct zcomp *comp, struct page *page, struct zcomp_cookie *cookie)
 {
 	int err;
 	unsigned int comp_len;
@@ -77,8 +80,7 @@ int zcomp_cpu_compress(struct zcomp *comp, struct page *page,
 	comp_len = PAGE_SIZE * 2;
 	stream = zcomp_stream_get(comp);
 	src = kmap_atomic(page);
-	err = crypto_comp_compress(stream->tfm, src, PAGE_SIZE,
-					stream->buffer, &comp_len);
+	err = crypto_comp_compress(stream->tfm, src, PAGE_SIZE, stream->buffer, &comp_len);
 	kunmap_atomic(src);
 	if (err) {
 		zcomp_stream_put(comp);
@@ -91,8 +93,7 @@ int zcomp_cpu_compress(struct zcomp *comp, struct page *page,
 	return err;
 }
 
-int zcomp_cpu_decompress(struct zcomp *comp, void *src,
-			unsigned int src_len, struct page *page)
+int zcomp_cpu_decompress(struct zcomp *comp, void *src, unsigned int src_len, struct page *page)
 {
 	void *dst;
 	unsigned int dst_len;
@@ -102,8 +103,7 @@ int zcomp_cpu_decompress(struct zcomp *comp, void *src,
 	dst = kmap_atomic(page);
 	dst_len = PAGE_SIZE;
 	stream = zcomp_stream_get(comp);
-	ret = crypto_comp_decompress(stream->tfm, src, src_len,
-							dst, &dst_len);
+	ret = crypto_comp_decompress(stream->tfm, src, src_len, dst, &dst_len);
 	zcomp_stream_put(comp);
 	kunmap_atomic(dst);
 
@@ -169,6 +169,7 @@ const struct zcomp_operation zcomp_cpu_op = {
 	.destroy = zcomp_cpu_destroy,
 	.compress = zcomp_cpu_compress,
 	.decompress = zcomp_cpu_decompress,
+	.compress_cache = zcomp_cpu_compress_cache,
 };
 
 int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)
@@ -192,7 +193,7 @@ int zcomp_cpu_dead(unsigned int cpu, struct hlist_node *node)
 	struct zcomp *comp = hlist_entry(node, struct zcomp, node);
 	struct zcomp_strm *zstrm;
 
-	zstrm = per_cpu_ptr((struct zcomp_strm __percpu*)comp->private, cpu);
+	zstrm = per_cpu_ptr((struct zcomp_strm __percpu *)comp->private, cpu);
 	zcomp_strm_free(zstrm);
 	return 0;
 }
@@ -208,11 +209,13 @@ static int zcomp_cpu_init(void)
 			goto out;
 	}
 
-	ret = cpuhp_setup_state_multi(CPUHP_ZCOMP_PREPARE,
-			"block/zram/zcomp/cpu:prepare",
-			zcomp_cpu_up_prepare, zcomp_cpu_dead);
+	ret = cpuhp_setup_state_multi(CPUHP_ZCOMP_PREPARE, "block/zram/zcomp/cpu:prepare",
+				      zcomp_cpu_up_prepare, zcomp_cpu_dead);
 	if (ret)
 		goto out;
+
+	zcomp_init_node_lists();
+	zcomp_cpu_thread();
 
 	return ret;
 

@@ -13,7 +13,12 @@ struct zcomp;
 struct bio;
 
 #define BATCH_ZCOMP_REQUEST (128)
-
+struct zcomp_strm {
+	/* The members ->buffer and ->tfm are protected by ->lock. */
+	local_lock_t lock;
+	void *buffer;
+	struct crypto_comp *tfm;
+};
 /*
  * For compression request, zcomp generates a cookie and pass it to
  * the zcomp instance. The zcomp instance need to call zcomp_copy_buffer
@@ -36,6 +41,7 @@ struct zcomp_cookie_pool {
 
 struct zcomp_operation {
 	int (*compress)(struct zcomp *comp, struct page *page, struct zcomp_cookie *cookie);
+	int (*compress_cache)(struct zcomp *comp, void* src, struct zcomp_cookie *cookie);
 	int (*compress_async)(struct zcomp *comp, struct page *page, struct zcomp_cookie *cookie);
 	int (*decompress)(struct zcomp *comp, void *src, unsigned int src_len, struct page *page);
 
@@ -72,4 +78,12 @@ int zcomp_unregister(const char *algo_name);
 
 int zcomp_copy_buffer(int err, void *buffer, int comp_len,
 			struct zcomp_cookie *cookie);
+			struct zcomp_strm *zcomp_stream_get(struct zcomp *comp);
+
+int zcomp_copy_buffer_cache(int err, void *buffer, int comp_len,
+		      struct zcomp_cookie *cookie);
+
+void zcomp_init_node_lists(void);
+void zcomp_cpu_thread(void);
+
 #endif /* _ZCOMP_H_ */
