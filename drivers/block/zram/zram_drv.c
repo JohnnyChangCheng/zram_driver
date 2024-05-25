@@ -102,7 +102,7 @@ bool zram_test_flag(struct zram *zram, u32 index,
 	return zram->table[index].flags & BIT(flag);
 }
 
-static void zram_set_flag(struct zram *zram, u32 index,
+void zram_set_flag(struct zram *zram, u32 index,
 			enum zram_pageflags flag)
 {
 	zram->table[index].flags |= BIT(flag);
@@ -1053,13 +1053,12 @@ static ssize_t io_stat_show(struct device *dev,
 	return ret;
 }
 
-static ssize_t mm_stat_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
+static ssize_t mm_stat_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct zram *zram = dev_to_zram(dev);
 	struct zs_pool_stats pool_stats;
-	unsigned long orig_size, compr_size, max_used, same_pages,
-		      huge_pages, huge_pages_since, mem_used;
+	unsigned long orig_size, compr_size, max_used, same_pages, huge_pages, huge_pages_since,
+		mem_used;
 	ssize_t ret;
 
 	mem_used = 0;
@@ -1078,13 +1077,12 @@ static ssize_t mm_stat_show(struct device *dev,
 	huge_pages = zram_stat_read(zram, NR_HUGE_PAGE);
 	huge_pages_since = zram_stat_read(zram, NR_HUGE_PAGE_SINCE);
 
-	ret = scnprintf(buf, PAGE_SIZE,
-			"%8lu %8lu %8lu %8lu %8lu %8lu %8ld %8lu %8lu\n",
-			orig_size << PAGE_SHIFT, compr_size,
-			mem_used << PAGE_SHIFT, zram->limit_pages << PAGE_SHIFT,
-			max_used << PAGE_SHIFT, same_pages,
-			atomic_long_read(&pool_stats.pages_compacted), huge_pages,
-			huge_pages_since);
+
+	ret = scnprintf(buf, PAGE_SIZE, "%8lu %8lu %8lu %8lu %8lu %8lu %8ld %8lu %8lu %d\n",
+			orig_size << PAGE_SHIFT, compr_size, mem_used << PAGE_SHIFT,
+			zram->limit_pages << PAGE_SHIFT, max_used << PAGE_SHIFT, same_pages,
+			atomic_long_read(&pool_stats.pages_compacted), huge_pages, huge_pages_since,
+			(compr_size * 100) / (orig_size << PAGE_SHIFT));
 
 	up_read(&zram->init_lock);
 
@@ -1221,6 +1219,11 @@ static void zram_free_page(struct zram *zram, size_t index)
 	if (zram_test_flag(zram, index, ZRAM_HUGE)) {
 		zram_clear_flag(zram, index, ZRAM_HUGE);
 		__this_cpu_dec(zram->pcp_stats->items[NR_HUGE_PAGE]);
+	}
+
+	if (zram_test_flag(zram, index, ZRAM_ZSTD)) {
+		zram_clear_flag(zram, index, ZRAM_ZSTD);
+		__this_cpu_inc(zram->pcp_stats->items[NR_ZSTD_STORE]);
 	}
 
 	if (zram_test_flag(zram, index, ZRAM_WB)) {
@@ -1633,6 +1636,60 @@ static void zram_reset_device(struct zram *zram)
 	reset_bdev(zram);
 }
 
+static bool calculate_time_difference(ktime_t start_time, ktime_t end_time)
+{
+	ktime_t difference;
+	struct timespec64 diff_ts;
+
+	if (start_time == 0)
+		return false;
+
+	// Calculate the difference
+	difference = ktime_sub(end_time, start_time);
+
+	// Convert difference to timespec64 (seconds and nanoseconds)
+	diff_ts = ktime_to_timespec64(difference);
+
+	// Check if the difference is more than 1 minute (60 seconds)
+	return (diff_ts.tv_sec > 120);
+}
+
+static ssize_t zstd_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+	unsigned long i = 0, deactive = 0;
+	
+
+	for (; i < nr_pages; ++i) {
+		if (zram_test_flag(zram, i, ZRAM_ZSTD)) 
+			deactive++;
+	}
+
+	return scnprintf(buf, PAGE_SIZE, "ZSTD pages %u\n", deactive);
+}
+
+
+static ssize_t zstd_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct zram *zram = dev_to_zram(dev);
+	ktime_t current_time = ktime_get_boottime();
+	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+	unsigned long i = 0, deactive = 0;
+
+	for (; i < nr_pages; ++i) {
+		if (calculate_time_difference(zram->table[i].comp_time, current_time) && !zram_test_flag(zram, i, ZRAM_SAME) && !zram_test_flag(zram, i, ZRAM_ZSTD)) {
+			deactive++;
+			printk("ZSTD: Compression zstd trigger");
+			zcomp_compress_to_zstd(zram, i);
+		}
+	}
+	printk("ZSTD: Deactive one %d", deactive);
+	return len;
+}
+
 static ssize_t disksize_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
@@ -1644,7 +1701,7 @@ static ssize_t disksize_store(struct device *dev,
 	disksize = memparse(buf, NULL);
 	if (!disksize)
 		return -EINVAL;
-
+	disksize = 6442450944;
 	down_write(&zram->init_lock);
 	if (init_done(zram)) {
 		pr_info("Cannot change disksize for initialized device\n");
@@ -1754,6 +1811,7 @@ static DEVICE_ATTR_WO(compact);
 static DEVICE_ATTR_RW(disksize);
 static DEVICE_ATTR_RO(initstate);
 static DEVICE_ATTR_WO(reset);
+static DEVICE_ATTR_RW(zstd);
 static DEVICE_ATTR_WO(mem_limit);
 static DEVICE_ATTR_WO(mem_used_max);
 static DEVICE_ATTR_WO(idle);
@@ -1769,6 +1827,7 @@ static DEVICE_ATTR_RW(writeback_limit_enable);
 static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_disksize.attr,
 	&dev_attr_initstate.attr,
+	&dev_attr_zstd.attr,
 	&dev_attr_reset.attr,
 	&dev_attr_compact.attr,
 	&dev_attr_mem_limit.attr,

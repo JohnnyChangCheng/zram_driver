@@ -48,7 +48,7 @@ enum zram_pageflags {
 	ZRAM_UNDER_WB,	/* page is under writeback */
 	ZRAM_HUGE,	/* Incompressible page */
 	ZRAM_IDLE,	/* not accessed page since last idle marking */
-	ZRAM_CACHE,
+	ZRAM_ZSTD,
 	__NR_ZRAM_PAGEFLAGS,
 };
 
@@ -64,6 +64,7 @@ struct zram_table_entry {
 #ifdef CONFIG_ZRAM_MEMORY_TRACKING
 	ktime_t ac_time;
 #endif
+	ktime_t comp_time;
 };
 
 enum zram_stat_item {
@@ -83,6 +84,7 @@ enum zram_stat_item {
 	NR_BD_COUNT,		/* no. of pages in backing device */
 	NR_BD_READ,		/* no. of reads from backing device */
 	NR_BD_WRITE,		/* no. of writes from backing device */
+	NR_ZSTD_STORE,
 	NR_ZRAM_STAT_ITEM,
 };
 
@@ -141,6 +143,8 @@ size_t zram_get_obj_size(struct zram *zram, u32 index);
 unsigned long zram_get_element(struct zram *zram, u32 index);
 bool zram_test_flag(struct zram *zram, u32 index, enum zram_pageflags flag);
 
+void zram_set_flag(struct zram *zram, u32 index,
+			enum zram_pageflags flag);
 struct bio;
 void zram_bio_endio(struct zram *zram, struct bio *bio, bool is_write, int err);
 void zram_page_write_endio(struct zram *zram, struct page *page, int err);

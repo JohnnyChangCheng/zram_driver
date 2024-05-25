@@ -314,6 +314,7 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 	unsigned long element;
 	struct zcomp_cookie *cookie;
 
+	comp->zram->table[index].comp_time = ktime_get_boottime();
 	if (zcomp_page_same_pattern(page, &element)) {
 		zram_slot_update(comp->zram, index, element, 0);
 		return 0;
@@ -365,6 +366,38 @@ int zcomp_compress(struct zcomp *comp, u32 index, struct page *page,
 	return ret;
 }
 
+int zcomp_compress_to_zstd(struct zram *zram, u32 index)
+{
+	void *src;
+	int ret;
+	unsigned int src_len;
+	static u8 page_buff[PAGE_SIZE];
+	static struct zcomp_cookie cookie;
+	unsigned long handle = zram_get_handle(zram, index);
+
+	if (!handle || zram_test_flag(zram, index, ZRAM_SAME))
+		return 0;
+	
+	src_len = zram_get_obj_size(zram, index);
+	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+	if (src_len == PAGE_SIZE) 
+		memcpy(page_buff, src, PAGE_SIZE);
+	else  
+		ret = zram->comp->op->dest_decompress(zram->comp, src, src_len, page_buff);
+	
+	zs_unmap_object(zram->mem_pool, handle);
+	cookie.zram = zram;
+	cookie.index = index;
+
+	ret = zram->comp->op->zstd_compress(zram->comp, page_buff, &cookie);
+
+	zram_set_flag(zram, index, ZRAM_ZSTD);
+	printk("ZSTD: Result %d", ret);
+
+	return 0;
+
+}
+
 int zcomp_decompress(struct zcomp *comp, u32 index, struct page *page)
 {
 	int ret = 0;
@@ -372,6 +405,8 @@ int zcomp_decompress(struct zcomp *comp, u32 index, struct page *page)
 	unsigned int src_len;
 	unsigned long handle;
 	struct zram *zram = comp->zram;
+
+	zram->table[index].comp_time = 0;
 
 	handle = zram_get_handle(zram, index);
 	if (!handle || zram_test_flag(zram, index, ZRAM_SAME)) {
@@ -395,7 +430,10 @@ int zcomp_decompress(struct zcomp *comp, u32 index, struct page *page)
 
 	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
 	trace_zcomp_decompress_start(page, index);
-	ret = comp->op->decompress(comp, src, src_len, page);
+	if (zram_test_flag(zram, index, ZRAM_ZSTD))
+		ret = comp->op->zstd_decompress(comp, src, src_len, page);
+	else
+		ret = comp->op->decompress(comp, src, src_len, page);
 	trace_zcomp_decompress_end(page, index);
 	zs_unmap_object(zram->mem_pool, handle);
 out:

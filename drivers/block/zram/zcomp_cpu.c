@@ -35,6 +35,7 @@ struct zcomp_strm {
 	local_lock_t lock;
 	void *buffer;
 	struct crypto_comp *tfm;
+	struct crypto_comp *zstd;
 };
 
 struct zcomp_strm *zcomp_stream_get(struct zcomp *comp)
@@ -91,6 +92,65 @@ int zcomp_cpu_compress(struct zcomp *comp, struct page *page,
 	return err;
 }
 
+int zcomp_cpu_compress_zstd(struct zcomp *comp, void *src,
+				struct zcomp_cookie *cookie)
+{
+	int err;
+	unsigned int comp_len;
+	struct zcomp_strm *stream;
+	cpu_zram++;
+
+	printk("Filed %s",__func__);
+	comp_len = PAGE_SIZE * 2;
+	stream = zcomp_stream_get(comp);
+	err = crypto_comp_compress(stream->zstd, src, PAGE_SIZE,
+					stream->buffer, &comp_len);
+	if (err) {
+		zcomp_stream_put(comp);
+		pr_err("Compression failed! err=%d\n", err);
+	}
+
+	err = zcomp_copy_buffer(err, stream->buffer, comp_len, cookie);
+	zcomp_stream_put(comp);
+
+	return err;
+}
+
+int zcomp_cpu_decompress_dest(struct zcomp *comp, void *src,
+			unsigned int src_len, void* dst)
+{
+	unsigned int dst_len;
+	struct zcomp_strm *stream;
+	int ret;
+ 
+	dst_len = PAGE_SIZE;
+	stream = zcomp_stream_get(comp);
+	ret = crypto_comp_decompress(stream->tfm, src, src_len,
+							dst, &dst_len);
+	zcomp_stream_put(comp);
+
+	return ret;
+}
+
+int zcomp_cpu_decompress_zstd(struct zcomp *comp, void *src,
+			unsigned int src_len, struct page *page)
+{
+	void *dst;
+	unsigned int dst_len;
+	struct zcomp_strm *stream;
+	int ret;
+
+	dst = kmap_atomic(page);
+	dst_len = PAGE_SIZE;
+	stream = zcomp_stream_get(comp);
+	ret = crypto_comp_decompress(stream->zstd, src, src_len,
+							dst, &dst_len);
+	zcomp_stream_put(comp);
+	kunmap_atomic(dst);
+
+	return ret;
+}
+
 int zcomp_cpu_decompress(struct zcomp *comp, void *src,
 			unsigned int src_len, struct page *page)
 {
@@ -107,6 +167,7 @@ int zcomp_cpu_decompress(struct zcomp *comp, void *src,
 	zcomp_stream_put(comp);
 	kunmap_atomic(dst);
 
+
 	return ret;
 }
 
@@ -114,6 +175,8 @@ static void zcomp_strm_free(struct zcomp_strm *zstrm)
 {
 	if (!IS_ERR_OR_NULL(zstrm->tfm))
 		crypto_free_comp(zstrm->tfm);
+	if (!IS_ERR_OR_NULL(zstrm->zstd))
+		crypto_free_comp(zstrm->zstd);
 	free_pages((unsigned long)zstrm->buffer, 1);
 	zstrm->tfm = NULL;
 	zstrm->buffer = NULL;
@@ -126,6 +189,7 @@ static void zcomp_strm_free(struct zcomp_strm *zstrm)
 static int zcomp_strm_init(struct zcomp_strm *zstrm, struct zcomp *comp)
 {
 	zstrm->tfm = crypto_alloc_comp(comp->algo_name, 0, 0);
+	zstrm->zstd = crypto_alloc_comp("zstd", 0, 0);
 	/*
 	 * allocate 2 pages. 1 for compressed data, plus 1 extra for the
 	 * case when compressed size is larger than the original one
@@ -169,6 +233,9 @@ const struct zcomp_operation zcomp_cpu_op = {
 	.destroy = zcomp_cpu_destroy,
 	.compress = zcomp_cpu_compress,
 	.decompress = zcomp_cpu_decompress,
+	.zstd_compress = zcomp_cpu_compress_zstd,
+	.zstd_decompress = zcomp_cpu_decompress_zstd,
+	.dest_decompress = zcomp_cpu_decompress_dest,
 };
 
 int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)

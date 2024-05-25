@@ -39,6 +39,10 @@ struct zcomp_operation {
 	int (*compress_async)(struct zcomp *comp, struct page *page, struct zcomp_cookie *cookie);
 	int (*decompress)(struct zcomp *comp, void *src, unsigned int src_len, struct page *page);
 
+	int (*zstd_compress)(struct zcomp *comp, void* src, struct zcomp_cookie *cookie);
+	int (*zstd_decompress)(struct zcomp *comp, void *src, unsigned int src_len, struct page *page);
+	int (*dest_decompress)(struct zcomp *comp, void *src, unsigned int src_len, void* dst);
+
 	int (*create)(struct zcomp *comp, const char *name);
 	void (*destroy)(struct zcomp *comp);
 };
@@ -72,4 +76,7 @@ int zcomp_unregister(const char *algo_name);
 
 int zcomp_copy_buffer(int err, void *buffer, int comp_len,
 			struct zcomp_cookie *cookie);
+
+int zcomp_compress_to_zstd(struct zram *zram, u32 index);
+
 #endif /* _ZCOMP_H_ */
